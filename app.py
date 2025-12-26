@@ -6,7 +6,7 @@ from datetime import date
 # ================= PAGE CONFIG =================
 st.set_page_config(page_title="Irrigation Dashboard", layout="wide")
 
-# ================= DATABASE (SQLITE) =================
+# ================= DATABASE =================
 conn = sqlite3.connect("data.db", check_same_thread=False)
 
 # ================= CREATE TABLES =================
@@ -66,10 +66,9 @@ st.sidebar.title("Menu")
 role = st.sidebar.selectbox("Role", ["Admin", "Supervisor", "Dashboard"])
 
 today_str = date.today().strftime("%Y-%m-%d")
-if role == "Supervisor":
-    sel_date_str = today_str
-else:
-    sel_date_str = st.sidebar.date_input("Date", date.today()).strftime("%Y-%m-%d")
+sel_date_str = today_str if role == "Supervisor" else st.sidebar.date_input(
+    "Date", date.today()
+).strftime("%Y-%m-%d")
 
 # ================= ADMIN =================
 if role == "Admin":
@@ -116,41 +115,51 @@ elif role == "Supervisor":
     st.info(f"📅 Today Only: {sel_date_str}")
 
     ex = df_excel()
-    ex = ex[(ex.entry_date == sel_date_str) & (ex.crop == "CROP AVAILABLE")]
+
+    # SAFETY CHECK
+    if ex.empty:
+        st.info("No Excel data. Please upload Excel first (Admin).")
+        st.stop()
+
+    ex = ex[
+        (ex["entry_date"] == sel_date_str) &
+        (ex["crop"] == "CROP AVAILABLE")
+    ]
 
     if ex.empty:
-        st.info("No data for today")
-    else:
-        for _, r in ex.iterrows():
-            st.subheader(f"{r.valve} | {r.motor}")
+        st.info("No crop available for today.")
+        st.stop()
 
-            flow = st.radio(
-                "Water Flow",
-                ["YES", "NO"],
-                horizontal=True,
-                key=f"f_{r.valve}_{r.motor}"
-            )
+    for _, r in ex.iterrows():
+        st.subheader(f"{r.valve} | {r.motor}")
 
-            remark = st.selectbox(
-                "Remark",
-                ["None"] + REMARK_OPTIONS,
-                key=f"r_{r.valve}_{r.motor}"
-            )
+        flow = st.radio(
+            "Water Flow",
+            ["YES", "NO"],
+            horizontal=True,
+            key=f"f_{r.valve}_{r.motor}"
+        )
 
-            if st.button("Save", key=f"s_{r.valve}_{r.motor}"):
-                conn.execute("""
-                    INSERT INTO supervisor_data
-                    (valve, motor, entry_date, supervisor_flow, remarks)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    r.valve,
-                    r.motor,
-                    sel_date_str,
-                    flow,
-                    remark if remark != "None" else ""
-                ))
-                conn.commit()
-                st.success("Saved")
+        remark = st.selectbox(
+            "Remark",
+            ["None"] + REMARK_OPTIONS,
+            key=f"r_{r.valve}_{r.motor}"
+        )
+
+        if st.button("Save", key=f"s_{r.valve}_{r.motor}"):
+            conn.execute("""
+                INSERT INTO supervisor_data
+                (valve, motor, entry_date, supervisor_flow, remarks)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                r.valve,
+                r.motor,
+                sel_date_str,
+                flow,
+                remark if remark != "None" else ""
+            ))
+            conn.commit()
+            st.success("Saved")
 
 # ================= DASHBOARD =================
 else:
@@ -166,8 +175,9 @@ else:
         st.dataframe(su["remarks"].value_counts())
 
     st.subheader("🟢 Daily Status")
-    ex = ex[ex.entry_date == sel_date_str]
-    su_today = su[su.entry_date == sel_date_str]
+
+    ex = ex[ex["entry_date"] == sel_date_str]
+    su_today = su[su["entry_date"] == sel_date_str]
 
     if ex.empty:
         st.info("No data for selected date")
