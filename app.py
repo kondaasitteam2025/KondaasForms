@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 st.set_page_config("Irrigation Dashboard", layout="wide")
 
 # ================= DATABASE (SUPABASE) =================
-DATABASE_URL = "postgresql+psycopg2://postgres:Kondaas%23Irrigation95%21@aws-1-ap-south-1.pooler.supabase.com:5432/postgres"
+DATABASE_URL = "postgresql+psycopg2://postgres:Kondaas%23Irrigation95%21@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require"
 
 engine = create_engine(DATABASE_URL)
 conn = engine.connect()
