@@ -1,50 +1,35 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 from datetime import date
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
 
 # ================= PAGE CONFIG =================
 st.set_page_config(page_title="Irrigation Dashboard", layout="wide")
 
-# ================= DATABASE (SUPABASE SESSION POOLER) =================
-DATABASE_URL = (
-    "postgresql+psycopg2://postgres:"
-    "Kondaas%23Irrigation95%21"
-    "@aws-1-ap-south-1.pooler.supabase.com:6543/postgres"
-)
-
-engine = create_engine(
-    DATABASE_URL,
-    poolclass=NullPool,                 # IMPORTANT for Supabase Pooler
-    connect_args={"sslmode": "require"},
-    pool_pre_ping=True
-)
+# ================= DATABASE (SQLITE) =================
+conn = sqlite3.connect("data.db", check_same_thread=False)
 
 # ================= CREATE TABLES =================
-with engine.begin() as conn:
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS excel_data (
-            valve TEXT,
-            motor TEXT,
-            crop TEXT,
-            excel_flow TEXT,
-            entry_date TEXT,
-            PRIMARY KEY (valve, motor, entry_date)
-        )
-    """))
+conn.execute("""
+CREATE TABLE IF NOT EXISTS excel_data (
+    valve TEXT,
+    motor TEXT,
+    crop TEXT,
+    excel_flow TEXT,
+    entry_date TEXT
+)
+""")
 
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS supervisor_data (
-            valve TEXT,
-            motor TEXT,
-            entry_date TEXT,
-            supervisor_flow TEXT,
-            remarks TEXT,
-            image_path TEXT,
-            PRIMARY KEY (valve, motor, entry_date)
-        )
-    """))
+conn.execute("""
+CREATE TABLE IF NOT EXISTS supervisor_data (
+    valve TEXT,
+    motor TEXT,
+    entry_date TEXT,
+    supervisor_flow TEXT,
+    remarks TEXT
+)
+""")
+conn.commit()
 
 # ================= CONSTANTS =================
 REMARK_OPTIONS = ["Pipe Leakage", "Extra", "Other"]
@@ -61,22 +46,20 @@ def time_to_flow(v):
 
 def get_status(crop, excel_flow, sup_flow):
     if crop == "CROP AVAILABLE" and excel_flow == "YES" and not sup_flow:
-        return "YELLOW"
-    if not sup_flow:
-        return ""
+        return "🟡"
     if crop == "CROP AVAILABLE" and excel_flow == "YES" and sup_flow == "YES":
-        return "GREEN"
+        return "🟢"
     if crop == "CROP AVAILABLE" and excel_flow == "NO" and sup_flow == "YES":
-        return "BLUE"
+        return "🔵"
     if crop == "NO CROP" and sup_flow == "YES":
-        return "RED"
-    return ""
+        return "🔴"
+    return "—"
 
 def df_excel():
-    return pd.read_sql(text("SELECT * FROM excel_data"), engine)
+    return pd.read_sql("SELECT * FROM excel_data", conn)
 
 def df_sup():
-    return pd.read_sql(text("SELECT * FROM supervisor_data"), engine)
+    return pd.read_sql("SELECT * FROM supervisor_data", conn)
 
 # ================= SIDEBAR =================
 st.sidebar.title("Menu")
@@ -86,15 +69,16 @@ today_str = date.today().strftime("%Y-%m-%d")
 if role == "Supervisor":
     sel_date_str = today_str
 else:
-    sel_date = st.sidebar.date_input("Date", date.today())
-    sel_date_str = sel_date.strftime("%Y-%m-%d")
+    sel_date_str = st.sidebar.date_input("Date", date.today()).strftime("%Y-%m-%d")
 
 # ================= ADMIN =================
 if role == "Admin":
     st.title("⬆️ Upload Irrigation Excel")
 
     files = st.file_uploader(
-        "Upload Excel (.xlsx)", type=["xlsx"], accept_multiple_files=True
+        "Upload Excel (.xlsx)",
+        type=["xlsx"],
+        accept_multiple_files=True
     )
 
     for file in files:
@@ -104,33 +88,26 @@ if role == "Admin":
         valve_col, crop_col = df.columns[:2]
         date_cols = df.columns[2:]
 
-        rows = []
         for _, r in df.iterrows():
             for d in date_cols:
                 parsed = pd.to_datetime(d, dayfirst=True, errors="coerce")
                 if pd.isna(parsed):
                     continue
-                rows.append({
-                    "v": r[valve_col],
-                    "m": motor,
-                    "c": norm_crop(r[crop_col]),
-                    "f": time_to_flow(r[d]),
-                    "d": parsed.strftime("%Y-%m-%d")
-                })
 
-        if rows:
-            with engine.begin() as conn:
-                conn.execute(text("""
+                conn.execute("""
                     INSERT INTO excel_data
                     (valve, motor, crop, excel_flow, entry_date)
-                    VALUES (:v, :m, :c, :f, :d)
-                    ON CONFLICT (valve, motor, entry_date)
-                    DO UPDATE SET
-                        crop = EXCLUDED.crop,
-                        excel_flow = EXCLUDED.excel_flow
-                """), rows)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    r[valve_col],
+                    motor,
+                    norm_crop(r[crop_col]),
+                    time_to_flow(r[d]),
+                    parsed.strftime("%Y-%m-%d")
+                ))
 
     if files:
+        conn.commit()
         st.success("Excel uploaded successfully")
 
 # ================= SUPERVISOR =================
@@ -142,7 +119,7 @@ elif role == "Supervisor":
     ex = ex[(ex.entry_date == sel_date_str) & (ex.crop == "CROP AVAILABLE")]
 
     if ex.empty:
-        st.info("No entries for today")
+        st.info("No data for today")
     else:
         for _, r in ex.iterrows():
             st.subheader(f"{r.valve} | {r.motor}")
@@ -151,42 +128,28 @@ elif role == "Supervisor":
                 "Water Flow",
                 ["YES", "NO"],
                 horizontal=True,
-                key=f"f{r.valve}{r.motor}"
+                key=f"f_{r.valve}_{r.motor}"
             )
 
             remark = st.selectbox(
                 "Remark",
                 ["None"] + REMARK_OPTIONS,
-                key=f"r{r.valve}{r.motor}"
+                key=f"r_{r.valve}_{r.motor}"
             )
 
-            extra = ""
-            if remark in ["Extra", "Other"]:
-                extra = st.text_input(
-                    "Specify",
-                    key=f"e{r.valve}{r.motor}"
-                )
-
-            if st.button("Save", key=f"s{r.valve}{r.motor}"):
-                final_remark = f"{remark} - {extra}" if extra else remark
-
-                with engine.begin() as conn:
-                    conn.execute(text("""
-                        INSERT INTO supervisor_data
-                        (valve, motor, entry_date, supervisor_flow, remarks, image_path)
-                        VALUES (:v, :m, :d, :f, :r, '')
-                        ON CONFLICT (valve, motor, entry_date)
-                        DO UPDATE SET
-                            supervisor_flow = EXCLUDED.supervisor_flow,
-                            remarks = EXCLUDED.remarks
-                    """), {
-                        "v": r.valve,
-                        "m": r.motor,
-                        "d": sel_date_str,
-                        "f": flow,
-                        "r": final_remark if remark != "None" else ""
-                    })
-
+            if st.button("Save", key=f"s_{r.valve}_{r.motor}"):
+                conn.execute("""
+                    INSERT INTO supervisor_data
+                    (valve, motor, entry_date, supervisor_flow, remarks)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    r.valve,
+                    r.motor,
+                    sel_date_str,
+                    flow,
+                    remark if remark != "None" else ""
+                ))
+                conn.commit()
                 st.success("Saved")
 
 # ================= DASHBOARD =================
@@ -196,75 +159,26 @@ else:
     ex = df_excel()
     su = df_sup()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        remark_filter = st.selectbox(
-            "Filter Remark", ["All"] + REMARK_OPTIONS
-        )
-    with col2:
-        show_history = st.checkbox(
-            "Show Remark History", True
-        )
-
-    if remark_filter != "All":
-        su = su[su.remarks.str.contains(remark_filter, na=False)]
-
     st.subheader("📌 Remark Count")
-    if not su.empty:
-        counts = su.remarks.str.extract(
-            r"(Pipe Leakage|Extra|Other)"
-        )[0].value_counts()
-        st.dataframe(counts.rename("Count"))
+    if su.empty:
+        st.info("No remarks yet")
     else:
-        st.info("No remarks found")
-
-    if show_history and not su.empty:
-        st.subheader("📜 Remark History")
-        st.dataframe(
-            su[["entry_date", "valve", "motor", "remarks"]]
-        )
+        st.dataframe(su["remarks"].value_counts())
 
     st.subheader("🟢 Daily Status")
-
     ex = ex[ex.entry_date == sel_date_str]
     su_today = su[su.entry_date == sel_date_str]
 
-    valves = sorted(ex.valve.unique())
-    motors = sorted(ex.motor.unique())
-
-    header = st.columns(len(motors) + 1)
-    header[0].markdown("### Valve")
-    for i, m in enumerate(motors):
-        header[i + 1].markdown(f"### {m}")
-
-    for valve in valves:
-        row = st.columns(len(motors) + 1)
-        row[0].markdown(f"**{valve}**")
-
-        for i, motor in enumerate(motors):
-            e = ex[(ex.valve == valve) & (ex.motor == motor)]
+    if ex.empty:
+        st.info("No data for selected date")
+    else:
+        for _, r in ex.iterrows():
             s = su_today[
-                (su_today.valve == valve) &
-                (su_today.motor == motor)
+                (su_today.valve == r.valve) &
+                (su_today.motor == r.motor)
             ]
 
-            if e.empty:
-                row[i + 1].write("—")
-                continue
+            sup_flow = s.iloc[0].supervisor_flow if not s.empty else ""
+            status = get_status(r.crop, r.excel_flow, sup_flow)
 
-            status = get_status(
-                e.iloc[0].crop,
-                e.iloc[0].excel_flow,
-                s.iloc[0].supervisor_flow if not s.empty else ""
-            )
-
-            if status == "GREEN":
-                row[i + 1].markdown("🟢")
-            elif status == "YELLOW":
-                row[i + 1].markdown("🟡")
-            elif status == "RED":
-                row[i + 1].markdown("🔴")
-            elif status == "BLUE":
-                row[i + 1].markdown("🔵")
-            else:
-                row[i + 1].write("")
+            st.write(f"{r.valve} | {r.motor} → {status}")
